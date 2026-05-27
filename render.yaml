@@ -1,0 +1,45 @@
+# Render Blueprint
+# Deploy: connect this repo in Render → "New Blueprint Instance" → pick this file.
+# Or skip the blueprint and create a Web Service manually; the buildCommand /
+# startCommand below mirror the values you'd enter in the dashboard.
+
+services:
+  - type: web
+    name: teleleprosy-api
+    runtime: python
+    plan: free
+    region: singapore           # closest to Indian users; change to taste
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FRONTEND_ORIGIN
+        # Set this to your Vercel URL (and any custom domain), comma-separated.
+        # e.g. https://teleleprosy.vercel.app,https://teleleprosy.example.org
+        sync: false
+      - key: FIREBASE_CREDENTIALS_JSON
+        # Paste the full serviceAccountKey.json (one line) into Render's
+        # secret env var. Loader prefers this over the on-disk path.
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: ZOOM_SDK_KEY
+        sync: false
+      - key: ZOOM_SDK_SECRET
+        sync: false
+      - key: WA_TOKEN
+        sync: false
+      - key: WA_PHONE_ID
+        sync: false
+      - key: WA_TPL_APPOINTMENT
+        value: appointment_scheduled
+      - key: WA_TPL_DECISION
+        value: triage_decision
+      - key: WA_TPL_RULEOUT
+        value: triage_decision
+      - key: WA_LANG
+        value: en
