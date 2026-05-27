@@ -15,7 +15,7 @@ from ..core.security import (
 )
 from ..models.schemas import AppointmentCreate, CaseStatus
 from ..services import whatsapp
-from ..services.zoom import create_meeting_stub, generate_signature
+from ..services.zoom import ZoomError, create_meeting, generate_signature
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +39,16 @@ def schedule_appointment(
         raise HTTPException(404, "Case not found")
     case = case_snap.to_dict()
 
-    meeting = create_meeting_stub(body.case_id)
+    try:
+        meeting = create_meeting(
+            body.case_id,
+            scheduled_at=body.scheduled_at,
+            duration_minutes=body.duration_minutes,
+        )
+    except ZoomError as e:
+        log.error("Zoom create_meeting failed for case %s: %s", body.case_id, e)
+        raise HTTPException(502, f"Zoom API error: {e}") from e
+
     ref = db.collection("appointments").document()
     appt = {
         "id": ref.id,
@@ -52,6 +61,10 @@ def schedule_appointment(
         "status": "scheduled",
         "zoom_meeting_id": meeting["meeting_number"],
         "zoom_join_url": meeting["join_url"],
+        # start_url is host-only; we never expose it via /mine, only via the
+        # /zoom-signature endpoint when an MO requests it for their own appt.
+        "zoom_start_url": meeting.get("start_url"),
+        "zoom_password": meeting.get("password", ""),
         "created_at": _now(),
         "created_by": user.uid,
     }
@@ -114,11 +127,20 @@ def schedule_appointment(
     return appt
 
 
+def _strip_host_fields(appt: dict, *, include_start_url: bool) -> dict:
+    """Don't leak the host start_url to anyone except the assigned MO."""
+    out = dict(appt)
+    if not include_start_url:
+        out.pop("zoom_start_url", None)
+    return out
+
+
 @router.get("/mine")
 def my_appointments(user: CurrentUser = Depends(get_current_user)):
     db = get_db()
     if user.role == "mo":
         docs = db.collection("appointments").where("mo_uid", "==", user.uid).stream()
+        items = [_strip_host_fields(d.to_dict(), include_start_url=True) for d in docs]
     elif user.role == "patient":
         pat = list(
             db.collection("patients")
@@ -133,12 +155,11 @@ def my_appointments(user: CurrentUser = Depends(get_current_user)):
             .where("patient_id", "==", pat[0].id)
             .stream()
         )
+        items = [_strip_host_fields(d.to_dict(), include_start_url=False) for d in docs]
     else:
         docs = db.collection("appointments").limit(50).stream()
-    return sorted(
-        [d.to_dict() for d in docs],
-        key=lambda x: x.get("scheduled_at") or _now(),
-    )
+        items = [_strip_host_fields(d.to_dict(), include_start_url=user.role == "admin") for d in docs]
+    return sorted(items, key=lambda x: x.get("scheduled_at") or _now())
 
 
 @router.get("/{appointment_id}/zoom-signature")
@@ -146,19 +167,41 @@ def zoom_signature(
     appointment_id: str, user: CurrentUser = Depends(get_current_user)
 ):
     """
-    Returns a signed Zoom Meeting SDK signature so the front-end can join
-    the meeting without ever holding the SDK secret.
+    Returns:
+      * ``signature``    Meeting SDK JWT, scoped to the caller's role
+      * ``meeting_number`` and ``password``
+      * ``join_url``     for participants (always returned)
+      * ``start_url``    host-only — only present if the caller is the
+                         assigned MO (or an admin)
     """
     db = get_db()
     snap = db.collection("appointments").document(appointment_id).get()
     if not snap.exists:
         raise HTTPException(404, "Appointment not found")
     appt = snap.to_dict()
-    role = 1 if user.role == "mo" and appt["mo_uid"] == user.uid else 0
+
+    # Authorisation: patient may only access their own appointment,
+    # MO must own the appointment, agents/admins may inspect any.
+    is_host_mo = user.role == "mo" and appt.get("mo_uid") == user.uid
+    if user.role == "patient":
+        pat = list(
+            db.collection("patients")
+            .where("patient_uid", "==", user.uid)
+            .limit(1)
+            .stream()
+        )
+        if not pat or appt.get("patient_id") != pat[0].id:
+            raise HTTPException(403, "Forbidden")
+
+    role = 1 if is_host_mo else 0
     sig = generate_signature(appt["zoom_meeting_id"], role)
-    return {
+    payload = {
         "signature": sig,
         "meeting_number": appt["zoom_meeting_id"],
+        "password": appt.get("zoom_password", ""),
         "role": role,
         "join_url": appt["zoom_join_url"],
     }
+    if is_host_mo or user.role == "admin":
+        payload["start_url"] = appt.get("zoom_start_url")
+    return payload

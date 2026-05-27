@@ -27,6 +27,12 @@ services:
         sync: false
       - key: FIREBASE_STORAGE_BUCKET
         sync: false
+      - key: ZOOM_ACCOUNT_ID
+        sync: false
+      - key: ZOOM_CLIENT_ID
+        sync: false
+      - key: ZOOM_CLIENT_SECRET
+        sync: false
       - key: ZOOM_SDK_KEY
         sync: false
       - key: ZOOM_SDK_SECRET

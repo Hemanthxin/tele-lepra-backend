@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .core.config import settings
 from .routers import admin, appointments, auth, cases, patients, uploads
@@ -29,3 +30,8 @@ app.include_router(uploads.router)
 @app.get("/")
 def health():
     return {"status": "ok", "service": "tele-leprosy-api"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)

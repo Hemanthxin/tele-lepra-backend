@@ -6,6 +6,12 @@ class Settings(BaseSettings):
     firebase_credentials_json: str = ""
     firebase_credentials_b64: str = ""
     firebase_storage_bucket: str = ""
+    # Zoom Server-to-Server OAuth — used to create real meetings via REST.
+    zoom_account_id: str = ""
+    zoom_client_id: str = ""
+    zoom_client_secret: str = ""
+    # Zoom Meeting SDK — used only if the front-end embeds the Zoom client.
+    # Skip these if patients join via the join_url in a new tab.
     zoom_sdk_key: str = ""
     zoom_sdk_secret: str = ""
     # Comma-separated list of allowed origins. Single origin works too.
