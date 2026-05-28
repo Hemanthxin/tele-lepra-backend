@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     wa_tpl_decision: str = "triage_decision"
     wa_tpl_ruleout: str = "triage_decision"
     wa_lang: str = "en"
+    # Verify token configured in the Meta Developer dashboard for the
+    # webhook callback URL. Meta sends this in the GET handshake; we must
+    # echo back hub.challenge only when it matches.
+    wa_verify_token: str = ""
+    # Optional: Meta app secret, used to validate X-Hub-Signature-256 on
+    # incoming POSTs. If blank, signature checking is skipped.
+    wa_app_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
