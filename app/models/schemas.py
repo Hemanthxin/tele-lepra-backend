@@ -1,8 +1,24 @@
+import re
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+_AADHAAR_RE = re.compile(r"^\d{12}$")
+_ABHA_RE = re.compile(r"^\d{14}$")  # numeric ABHA / health-id number
+_PHONE_RE = re.compile(r"^\+?[\d\s-]{7,15}$")
+
+
+def _normalize_digits(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    # Remove spaces and hyphens commonly used in formatting
+    return re.sub(r"[\s-]", "", v)
 
 
 class Sex(str, Enum):
@@ -34,13 +50,45 @@ class PatientCreate(BaseModel):
     name: str
     age: int = Field(ge=0, le=120)
     sex: Sex
-    phone: str
+    phone: str = Field(min_length=7, description="Phone number is required")
     location: str
     state: Optional[str] = None
     district: Optional[str] = None
     village: Optional[str] = None
-    abha_id: Optional[str] = None
+    aadhaar_id: Optional[str] = Field(default=None, description="12-digit Aadhaar number")
+    abha_id: Optional[str] = Field(default=None, description="14-digit ABHA health ID")
+    referred_by: Optional[str] = None
     consent_given: bool = True
+
+    @field_validator("phone")
+    @classmethod
+    def _phone_required(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Phone number is required")
+        if not _PHONE_RE.match(v):
+            raise ValueError("Phone number looks invalid")
+        return v
+
+    @field_validator("aadhaar_id", mode="before")
+    @classmethod
+    def _validate_aadhaar(cls, v):
+        v = _normalize_digits(v)
+        if v is None:
+            return None
+        if not _AADHAAR_RE.match(v):
+            raise ValueError("Aadhaar must be exactly 12 digits")
+        return v
+
+    @field_validator("abha_id", mode="before")
+    @classmethod
+    def _validate_abha(cls, v):
+        v = _normalize_digits(v)
+        if v is None:
+            return None
+        if not _ABHA_RE.match(v):
+            raise ValueError("ABHA ID must be exactly 14 digits")
+        return v
 
 
 class Patient(PatientCreate):
@@ -48,6 +96,7 @@ class Patient(PatientCreate):
     created_at: datetime
     created_by: str  # agent uid
     patient_uid: Optional[str] = None  # firebase auth uid if patient has login
+    synthetic_email: Optional[str] = None  # internal email for Firebase auth lookup
 
 
 class SymptomsSelfReport(BaseModel):

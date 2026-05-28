@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import secrets
 import time
 from datetime import datetime
 from typing import Literal, Optional
@@ -28,6 +29,13 @@ import httpx
 import jwt as pyjwt
 
 from ..core.config import settings
+
+
+def _generate_passcode() -> str:
+    """6-digit numeric passcode — easy to copy/paste and Zoom-compatible.
+    Zoom passcodes allow [a-zA-Z0-9@_*-]; we stick to digits for typability.
+    """
+    return "".join(str(secrets.randbelow(10)) for _ in range(6))
 
 log = logging.getLogger(__name__)
 
@@ -100,10 +108,12 @@ def create_meeting(
         return _create_meeting_stub(case_id)
 
     token = _get_access_token()
+    passcode = _generate_passcode()
     payload = {
         "topic": topic or f"Tele-Leprosy consult {case_id[:8]}",
         "type": 2 if scheduled_at else 1,  # 1 = instant, 2 = scheduled
         "duration": duration_minutes,
+        "password": passcode,  # explicit so we always know it; embedded in join_url by Zoom
         "settings": {
             "host_video": True,
             "participant_video": True,
@@ -142,12 +152,15 @@ def create_meeting(
         raise ZoomError(str(e)) from e
 
     data = r.json()
+    # Prefer the passcode we sent — Zoom occasionally omits it from the
+    # response payload depending on account-level security settings, but
+    # the meeting is created with the value we passed.
     return {
         "meeting_number": str(data["id"]),
         "topic": data.get("topic"),
         "join_url": data.get("join_url"),
         "start_url": data.get("start_url"),
-        "password": data.get("password", ""),
+        "password": data.get("password") or passcode,
     }
 
 
