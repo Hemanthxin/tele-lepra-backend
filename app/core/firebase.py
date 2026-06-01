@@ -1,5 +1,7 @@
 import base64
+import datetime
 import json
+import logging
 import os
 from functools import lru_cache
 
@@ -7,6 +9,8 @@ import firebase_admin
 from firebase_admin import auth, credentials, firestore, storage
 
 from .config import settings
+
+log = logging.getLogger("firebase")
 
 
 def _load_credentials() -> credentials.Certificate:
@@ -57,6 +61,34 @@ def get_db():
 def get_bucket():
     init_firebase()
     return storage.bucket()
+
+
+# Default lifetime for signed-URL fallbacks (7 days — WhatsApp needs the link
+# reachable long enough for the patient to open it).
+_SIGNED_URL_DAYS = 7
+
+
+def upload_public(content: bytes, key: str, content_type: str) -> str:
+    """Upload bytes to Storage and return a URL the recipient can open.
+
+    Prefers a public URL (legacy buckets with per-object ACLs). Modern Firebase
+    buckets enable uniform bucket-level access, where ``make_public`` raises —
+    in that case we fall back to a time-limited signed URL (the service-account
+    key can sign offline). Raises on a genuine upload failure (e.g. missing
+    bucket) so callers can log it.
+    """
+    blob = get_bucket().blob(key)
+    blob.upload_from_string(content, content_type=content_type)
+    try:
+        blob.make_public()
+        return blob.public_url
+    except Exception as e:  # uniform bucket-level access, or no ACL permission
+        log.info("make_public failed for %s (%s) — using signed URL", key, e)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(days=_SIGNED_URL_DAYS),
+            method="GET",
+        )
 
 
 def get_auth():

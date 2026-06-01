@@ -46,18 +46,60 @@ def _to_e164(phone: str | None) -> str | None:
     return digits
 
 
+def _post_template(
+    url: str,
+    headers: dict,
+    normalized: str,
+    template_name: str,
+    params: Iterable[str],
+    language: str,
+    document_url: str | None = None,
+    document_filename: str | None = None,
+):
+    components: list[dict] = []
+    if document_url:
+        components.append({
+            "type": "header",
+            "parameters": [{
+                "type": "document",
+                "document": {
+                    "link": document_url,
+                    **({"filename": document_filename} if document_filename else {}),
+                },
+            }],
+        })
+    components.append({
+        "type": "body",
+        "parameters": [
+            {"type": "text", "text": str(p)} for p in params
+        ],
+    })
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": normalized,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language},
+            "components": components,
+        },
+    }
+    return httpx.post(url, json=payload, headers=headers, timeout=10.0)
+
+
 def send_template(
     to: str,
     template_name: str,
     params: Iterable[str],
     *,
     language: str = "en",
+    document_url: str | None = None,
+    document_filename: str | None = None,
 ) -> dict:
     """Send an approved WhatsApp template message.
 
-    `to` should be the patient's phone in any common format; it is normalized
-    to E.164 internally. `params` populates the {{1}}, {{2}}, … placeholders
-    in the template body, in order.
+    Tries the configured `language` first; if Meta returns 132001 (template
+    not found in that locale), falls back through the common English variants.
     """
     if not is_configured():
         log.info("WhatsApp not configured — would have sent %s to %s", template_name, to)
@@ -69,45 +111,53 @@ def send_template(
         return {"skipped": True, "reason": "invalid_phone"}
 
     url = f"{GRAPH_BASE}/{settings.wa_phone_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": normalized,
-        "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {"code": language},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": str(p)} for p in params
-                    ],
-                }
-            ],
-        },
-    }
     headers = {
         "Authorization": f"Bearer {settings.wa_token}",
         "Content-Type": "application/json",
     }
 
-    try:
-        r = httpx.post(url, json=payload, headers=headers, timeout=10.0)
-        r.raise_for_status()
-        return r.json()
-    except httpx.HTTPStatusError as e:
-        log.error(
-            "WhatsApp API error %s for template=%s body=%s",
-            e.response.status_code,
-            template_name,
-            e.response.text[:500],
+    # Try the configured locale first, then common English variants. De-dup
+    # while preserving order.
+    candidates: list[str] = []
+    for c in (language, "en_US", "en", "en_GB"):
+        if c and c not in candidates:
+            candidates.append(c)
+
+    last_err: httpx.HTTPStatusError | None = None
+    for code in candidates:
+        try:
+            r = _post_template(
+                url, headers, normalized, template_name, params, code,
+                document_url=document_url, document_filename=document_filename,
+            )
+            r.raise_for_status()
+            if code != language:
+                log.info(
+                    "WhatsApp template %s sent via fallback locale %s (configured was %s)",
+                    template_name, code, language,
+                )
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            last_err = e
+            # 132001 = template not found in this locale — try next candidate.
+            body = e.response.text or ""
+            if "132001" in body or e.response.status_code == 404:
+                continue
+            # Different error — fail fast, don't keep trying.
+            break
+        except httpx.HTTPError as e:
+            log.error("WhatsApp transport error: %s", e)
+            raise WhatsAppError(str(e)) from e
+
+    if last_err is not None:
+        log.warning(
+            "WhatsApp template %s not configured in any of %s — skipping. Body: %s",
+            template_name, candidates, (last_err.response.text or "")[:200],
         )
         raise WhatsAppError(
-            f"WhatsApp {e.response.status_code}: {e.response.text[:200]}"
-        ) from e
-    except httpx.HTTPError as e:
-        log.error("WhatsApp transport error: %s", e)
-        raise WhatsAppError(str(e)) from e
+            f"Template {template_name!r} not configured in WhatsApp Business (tried {candidates})."
+        ) from last_err
+    return {"skipped": True, "reason": "template_missing"}
 
 
 def send_text(to: str, body: str) -> dict:
