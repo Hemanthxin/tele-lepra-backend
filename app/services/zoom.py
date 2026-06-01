@@ -29,6 +29,7 @@ import httpx
 import jwt as pyjwt
 
 from ..core.config import settings
+from .ids import display_id
 
 
 def _generate_passcode() -> str:
@@ -110,7 +111,7 @@ def create_meeting(
     token = _get_access_token()
     passcode = _generate_passcode()
     payload = {
-        "topic": topic or f"Tele-Leprosy consult {case_id[:8]}",
+        "topic": topic or f"Tele-Leprosy consult {display_id(case_id)}",
         "type": 2 if scheduled_at else 1,  # 1 = instant, 2 = scheduled
         "duration": duration_minutes,
         "password": passcode,  # explicit so we always know it; embedded in join_url by Zoom
@@ -169,7 +170,7 @@ def _create_meeting_stub(case_id: str) -> dict:
     meeting_number = str(abs(hash(case_id)) % 10_000_000_000).zfill(10)
     return {
         "meeting_number": meeting_number,
-        "topic": f"Tele-Leprosy consult {case_id[:8]}",
+        "topic": f"Tele-Leprosy consult {display_id(case_id)}",
         "join_url": f"https://zoom.us/j/{meeting_number}",
         "start_url": None,
         "password": "",

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     wa_phone_id: str = ""
     wa_tpl_appointment: str = "appointment_scheduled"
     wa_tpl_decision: str = "triage_decision"
+    wa_tpl_decision_with_report: str = "triage_decision_with_report"
     wa_tpl_ruleout: str = "triage_decision"
     wa_lang: str = "en"
     # Verify token configured in the Meta Developer dashboard for the

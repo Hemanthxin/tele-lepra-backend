@@ -16,14 +16,19 @@ from ..core.security import (
     require_roles,
 )
 from ..models.schemas import (
+    AgentDecision,
     CaseCreate,
     CaseStatus,
     HistoryEntry,
-    LeprosyScreening,
+    MOClinicalAssessment,
     MODecision,
+    Screening,
+    SUSPECT_DISEASE_LABELS,
 )
 from ..services import whatsapp
-from ..services.rule_engine import triage_leprosy
+from ..services.ids import generate_code
+from ..services.rule_engine import inferred_conditions, triage
+from .reports import build_and_upload_decision_pdf
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +79,7 @@ def create_case(body: CaseCreate, user: CurrentUser = Depends(get_current_user))
     if not pat.exists:
         raise HTTPException(404, "Patient not found")
     pdata = pat.to_dict()
-    ref = db.collection("cases").document()
+    ref = db.collection("cases").document(generate_code(db, "cases"))
     data = {
         "id": ref.id,
         "patient_id": body.patient_id,
@@ -84,6 +89,9 @@ def create_case(body: CaseCreate, user: CurrentUser = Depends(get_current_user))
         "created_at": _now(),
         "updated_at": _now(),
         "created_by": user.uid,
+        # Denormalised programme + household context for cheap MO-queue grouping.
+        "phc": pdata.get("phc"),
+        "household_number": pdata.get("household_number"),
     }
     ref.set(data)
     return data
@@ -106,71 +114,131 @@ def add_history(case_id: str, body: HistoryEntry):
     "/{case_id}/screen",
     dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_ADMIN))],
 )
-def submit_screening(case_id: str, body: LeprosyScreening):
+def submit_screening(case_id: str, body: Screening):
+    """Store the multi-disease screening and compute an advisory triage result.
+
+    Side-effects (recall scheduling, patient WhatsApp) are NOT fired here — they
+    happen when the agent confirms the decision via /agent-decision. The one
+    automatic path is high leprosy probability (triage.allow_close == False),
+    where the case goes straight to the MO queue.
+    """
     db = get_db()
     snap = _get_case_or_404(db, case_id)
-    triage = triage_leprosy(body)
+    result = triage(body)
 
-    status_map = {
-        "rule_out": CaseStatus.closed_rule_out.value,
-        "alternative_dx": CaseStatus.closed_alt_dx.value,
-        "escalate": CaseStatus.awaiting_mo.value,
+    # Forced MO (high leprosy) -> awaiting_mo. Otherwise park in `triaged` and
+    # wait for the agent's Send-to-MO / Close decision.
+    new_status = (
+        CaseStatus.awaiting_mo.value
+        if not result.allow_close
+        else CaseStatus.triaged.value
+    )
+
+    # The engine infers the candidate conditions — the agent does not pick them.
+    suspected = inferred_conditions(result)
+    screening_doc = body.model_dump()
+    screening_doc["suspected_diseases"] = suspected
+    update = {
+        "screening": screening_doc,
+        "suspected_diseases": suspected,
+        "triage": result.model_dump(),
+        "triage_outcome": result.outcome.value,
+        "allow_close": result.allow_close,
+        "status": new_status,
+        "updated_at": _now(),
     }
-    new_status = status_map[triage.outcome.value]
+    # Keep the case's headline condition aligned with the leading suspicion.
+    if result.suspected_condition and result.suspected_condition != "none":
+        update["condition"] = result.suspected_condition
+    snap.reference.set(update, merge=True)
 
+    return result.model_dump()
+
+
+@router.post(
+    "/{case_id}/agent-decision",
+    dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_ADMIN))],
+)
+def agent_decision(case_id: str, body: AgentDecision):
+    """Agent's advisory decision after triage: send to MO or close at community.
+
+    Closing is rejected if triage marked the case as forced-MO (allow_close
+    False) — that case must go to the Medical Officer.
+    """
+    db = get_db()
+    snap = _get_case_or_404(db, case_id)
+    case_data = snap.to_dict() or {}
+
+    if body.action == "send_mo":
+        snap.reference.set(
+            {"status": CaseStatus.awaiting_mo.value, "agent_decision": "send_mo",
+             "agent_decision_note": body.note, "updated_at": _now()},
+            merge=True,
+        )
+        return {"ok": True, "status": CaseStatus.awaiting_mo.value}
+
+    if body.action != "close":
+        raise HTTPException(400, "action must be 'send_mo' or 'close'")
+
+    if case_data.get("allow_close") is False:
+        raise HTTPException(
+            409, "This case has a high leprosy probability and must be sent to the Medical Officer."
+        )
+
+    # Close at community level. A non-leprosy chosen condition => alt-dx close;
+    # otherwise a plain rule-out close.
+    chosen = body.chosen_condition.value if body.chosen_condition else None
+    is_alt_dx = bool(chosen and chosen != "leprosy")
+    new_status = (
+        CaseStatus.closed_alt_dx.value if is_alt_dx else CaseStatus.closed_rule_out.value
+    )
     snap.reference.set(
         {
-            "screening": body.model_dump(),
-            "triage": triage.model_dump(),
-            "triage_outcome": triage.outcome.value,
             "status": new_status,
+            "agent_decision": "close",
+            "agent_decision_note": body.note,
+            "closed_condition": chosen,
+            "closed_at": _now(),
             "updated_at": _now(),
         },
         merge=True,
     )
 
-    case_data = snap.to_dict()
+    # Schedule a recall and notify the patient.
     patient_id = case_data.get("patient_id")
-
-    # Recall scheduling: rule-outs get a 4-6 week follow-up reminder.
-    if triage.outcome.value == "rule_out":
+    if patient_id:
         db.collection("recalls").add(
             {
                 "case_id": case_id,
                 "patient_id": patient_id,
                 "due_at": _now().replace(microsecond=0),
                 "status": "pending",
-                "weeks_offset": 4,
+                "weeks_offset": 2 if is_alt_dx else 4,
             }
         )
-
-    # WhatsApp notification for terminal outcomes. Escalations are messaged
-    # later when the MO schedules the tele-consult (handled in appointments).
-    if triage.outcome.value in ("rule_out", "alternative_dx") and patient_id:
         phone, name = _patient_phone_name(db, patient_id)
-        outcome_label = {
-            "rule_out": "No signs of leprosy detected",
-            "alternative_dx": "Alternative diagnosis suspected",
-        }[triage.outcome.value]
-        next_step = {
-            "rule_out": "Follow-up review in 4-6 weeks. Stay safe.",
-            "alternative_dx": "Please follow the agent's prescription. Recall in 2 weeks.",
-        }[triage.outcome.value]
+        if is_alt_dx:
+            cond_label = SUSPECT_DISEASE_LABELS.get(chosen, (chosen or "").replace("_", " ").title())
+            outcome_label = f"Reviewed — {cond_label} suspected, treated at community level"
+            next_step = body.note or "Please follow the advice given. Recall in 2 weeks."
+        else:
+            outcome_label = "No urgent signs detected"
+            next_step = body.note or "Follow-up review in 4-6 weeks. Stay safe."
         wa_result = _wa_send(phone, settings.wa_tpl_ruleout, [name, outcome_label, next_step])
         db.collection("notifications").add(
             {
                 "case_id": case_id,
                 "patient_id": patient_id,
                 "patient_phone": phone,
-                "kind": triage.outcome.value,
-                "payload": {"outcome": outcome_label, "next_step": next_step},
+                "kind": "agent_close",
+                "payload": {"outcome": outcome_label, "next_step": next_step, "condition": chosen},
                 "whatsapp_result": wa_result,
                 "created_at": _now(),
                 "sent": bool(wa_result.get("messages")),
             }
         )
 
-    return triage.model_dump()
+    return {"ok": True, "status": new_status}
 
 
 @router.get(
@@ -229,11 +297,46 @@ def get_case(case_id: str, user: CurrentUser = Depends(get_current_user)):
     db = get_db()
     snap = _get_case_or_404(db, case_id)
     data = snap.to_dict()
+    pat_doc = db.collection("patients").document(data["patient_id"]).get()
+    pat = pat_doc.to_dict() if pat_doc.exists else {}
     if user.role == ROLE_PATIENT:
-        pat = db.collection("patients").document(data["patient_id"]).get()
-        if not pat.exists or pat.to_dict().get("patient_uid") != user.uid:
+        if pat.get("patient_uid") != user.uid:
             raise HTTPException(403, "Forbidden")
+    # Flatten patient fields under c.patient_<field> for the MO/agent UI which
+    # already renders them inline. Doesn't overwrite same-named keys on the case.
+    for key, val in (pat or {}).items():
+        if key in ("id", "patient_uid", "synthetic_email", "created_at", "created_by"):
+            continue
+        target = f"patient_{key}" if key != "name" else "patient_name"
+        data.setdefault(target, val)
     return data
+
+
+@router.post(
+    "/{case_id}/clinical-assessment",
+    dependencies=[Depends(require_roles(ROLE_MO, ROLE_ADMIN))],
+)
+def save_clinical_assessment(
+    case_id: str,
+    body: MOClinicalAssessment,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save the MO's post-consultation clinical assessment (PDF1 Teleconsultation block).
+
+    Must be saved at least once before /decision will accept a submission.
+    """
+    db = get_db()
+    snap = _get_case_or_404(db, case_id)
+    snap.reference.set(
+        {
+            "clinical_assessment": body.model_dump(),
+            "clinical_assessment_by": user.uid,
+            "clinical_assessment_at": _now(),
+            "updated_at": _now(),
+        },
+        merge=True,
+    )
+    return {"ok": True}
 
 
 @router.post(
@@ -247,39 +350,76 @@ def mo_decision(
 ):
     db = get_db()
     snap = _get_case_or_404(db, case_id)
-    if body.decision not in ("close_remote", "refer"):
-        raise HTTPException(400, "decision must be close_remote or refer")
-    new_status = (
-        CaseStatus.closed_remote.value
-        if body.decision == "close_remote"
-        else CaseStatus.referred.value
-    )
-    snap.reference.set(
-        {
-            "status": new_status,
-            "mo_notes": body.notes,
-            "prescription": body.prescription,
-            "referral_note": body.referral_note,
-            "closed_by": user.uid,
-            "closed_at": _now(),
-            "updated_at": _now(),
-        },
-        merge=True,
-    )
+    status_by_decision = {
+        "close_remote": CaseStatus.closed_remote.value,
+        "alt_dx": CaseStatus.closed_alt_dx.value,
+        "refer": CaseStatus.referred.value,
+    }
+    if body.decision not in status_by_decision:
+        raise HTTPException(400, "decision must be close_remote, alt_dx or refer")
+    case_data = snap.to_dict() or {}
+    if not case_data.get("clinical_assessment"):
+        raise HTTPException(
+            400,
+            "Clinical assessment must be saved before submitting a decision.",
+        )
+    new_status = status_by_decision[body.decision]
+    now = _now()
+    update = {
+        "status": new_status,
+        "mo_decision": body.decision,
+        "mo_notes": body.notes,
+        "prescription": body.prescription,
+        "referral_note": body.referral_note,
+        "closed_by": user.uid,
+        "closed_at": now,
+        "updated_at": now,
+    }
+    snap.reference.set(update, merge=True)
 
     # WhatsApp the decision to the patient.
-    case_data = snap.to_dict()
     patient_id = case_data.get("patient_id")
     phone, name = _patient_phone_name(db, patient_id) if patient_id else (None, "Patient")
 
-    if body.decision == "close_remote":
-        outcome_label = "Reviewed — closed at community level"
-        next_step = body.prescription or "Follow the prescription provided. Reach out if symptoms worsen."
-    else:
+    if body.decision == "refer":
         outcome_label = "Referred for further care"
         next_step = body.referral_note or "Please visit the referral centre as advised."
+    elif body.decision == "alt_dx":
+        outcome_label = "Reviewed — alternative diagnosis, treated at community level"
+        next_step = body.prescription or "Follow the treatment advised. Recall in 2 weeks if no improvement."
+    else:
+        outcome_label = "Reviewed — closed at community level"
+        next_step = body.prescription or "Follow the prescription provided. Reach out if symptoms worsen."
 
-    wa_result = _wa_send(phone, settings.wa_tpl_decision, [name, outcome_label, next_step])
+    # Build + upload the decision PDF from the UPDATED case (merge the decision
+    # fields onto the pre-update snapshot) so the patient's copy reflects it.
+    # This is done independently of WhatsApp: the decision and its PDF are
+    # persisted on save, whether or not the message is ever sent.
+    pdf_info = build_and_upload_decision_pdf({**case_data, **update, "id": case_id})
+    if pdf_info:
+        snap.reference.set(
+            {"report_url": pdf_info[0], "report_filename": pdf_info[1], "report_generated_at": now},
+            merge=True,
+        )
+    wa_result: dict = {}
+    if phone and pdf_info:
+        pdf_url, pdf_filename = pdf_info
+        try:
+            wa_result = whatsapp.send_template(
+                phone,
+                settings.wa_tpl_decision_with_report,
+                [name, outcome_label, next_step],
+                language=settings.wa_lang,
+                document_url=pdf_url,
+                document_filename=pdf_filename,
+            )
+        except whatsapp.WhatsAppError as e:
+            log.warning("WA with-report dispatch failed (%s): %s — falling back to text template",
+                        settings.wa_tpl_decision_with_report, e)
+            wa_result = {}  # trigger fallback
+    if not wa_result.get("messages"):
+        # Plain-text fallback (or no PDF available).
+        wa_result = _wa_send(phone, settings.wa_tpl_decision, [name, outcome_label, next_step])
 
     db.collection("notifications").add(
         {
@@ -289,8 +429,9 @@ def mo_decision(
             "kind": body.decision,
             "payload": body.model_dump(),
             "whatsapp_result": wa_result,
+            "report_url": pdf_info[0] if pdf_info else None,
             "created_at": _now(),
             "sent": bool(wa_result.get("messages")),
         }
     )
-    return {"ok": True, "status": new_status}
+    return {"ok": True, "status": new_status, "report_url": pdf_info[0] if pdf_info else None}

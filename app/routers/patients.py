@@ -14,6 +14,7 @@ from ..core.security import (
     require_roles,
 )
 from ..models.schemas import Patient, PatientCreate, SelfEnrollment
+from ..services.ids import generate_code
 
 router = APIRouter(prefix="/patients", tags=["patients"])
 
@@ -29,7 +30,7 @@ def create_patient(
     if not body.consent_given:
         raise HTTPException(400, "Consent is required to enroll a patient.")
     db = get_db()
-    ref = db.collection("patients").document()
+    ref = db.collection("patients").document(generate_code(db, "patients"))
     data = body.model_dump()
     data.update(
         {
@@ -150,7 +151,7 @@ def self_enroll(
     )
     if existing:
         raise HTTPException(409, "Patient record already exists for this user.")
-    ref = db.collection("patients").document()
+    ref = db.collection("patients").document(generate_code(db, "patients"))
     payload = body.model_dump()
     payload.update(
         {
