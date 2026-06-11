@@ -20,7 +20,7 @@ from typing import Iterable
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from ..core.firebase import get_db, upload_public
+from ..core.firebase import get_db, patient_storage_key, upload_public
 from ..core.security import (
     ROLE_ADMIN,
     ROLE_AGENT,
@@ -101,7 +101,7 @@ def _upload_pdf_public(content: bytes, key: str) -> str:
 
 
 def build_and_upload_decision_pdf(case: dict) -> tuple[str, str] | None:
-    """Generate the decision PDF for a case and upload it to Firebase Storage.
+    """Generate the MO report (decision PDF) and upload it to the patient folder.
 
     Returns (public_url, filename) on success, None on any failure. Failures
     are logged but never raised — the caller (the decision route) must keep
@@ -114,11 +114,34 @@ def build_and_upload_decision_pdf(case: dict) -> tuple[str, str] | None:
         case = _join_patient(db, case)
         pdf = build_decision_pdf(case)
     except Exception as e:  # pragma: no cover
-        log.warning("Decision PDF build failed for %s: %s", case_id, e)
+        log.warning("MO report build failed for %s: %s", case_id, e)
         return None
     try:
-        url = _upload_pdf_public(pdf, f"reports/{case_id}/decision-{short}.pdf")
-        return url, f"Lepra-decision-{short}.pdf"
+        key = patient_storage_key(case.get("patient_id", case_id), case.get("patient_name"), f"mo-report-{short}.pdf")
+        url = _upload_pdf_public(pdf, key)
+        return url, f"MO-report-{short}.pdf"
     except Exception as e:  # pragma: no cover
-        log.warning("Decision PDF upload failed for %s: %s", case_id, e)
+        log.warning("MO report upload failed for %s: %s", case_id, e)
+        return None
+
+
+def build_and_upload_intake_pdf(case: dict) -> tuple[str, str] | None:
+    """Generate the agent report (intake PDF) and upload it to the patient folder.
+
+    Returns (public_url, filename) or None. Best-effort — never raises."""
+    case_id = case.get("id") or "unknown"
+    short = display_id(case_id)
+    try:
+        db = get_db()
+        case = _join_patient(db, case)
+        pdf = build_intake_pdf(case)
+    except Exception as e:  # pragma: no cover
+        log.warning("Agent report build failed for %s: %s", case_id, e)
+        return None
+    try:
+        key = patient_storage_key(case.get("patient_id", case_id), case.get("patient_name"), f"agent-report-{short}.pdf")
+        url = _upload_pdf_public(pdf, key)
+        return url, f"Agent-report-{short}.pdf"
+    except Exception as e:  # pragma: no cover
+        log.warning("Agent report upload failed for %s: %s", case_id, e)
         return None

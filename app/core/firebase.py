@@ -3,6 +3,8 @@ import datetime
 import json
 import logging
 import os
+import re
+import urllib.parse
 from functools import lru_cache
 
 import firebase_admin
@@ -66,6 +68,44 @@ def get_bucket():
 # Default lifetime for signed-URL fallbacks (7 days — WhatsApp needs the link
 # reachable long enough for the patient to open it).
 _SIGNED_URL_DAYS = 7
+
+
+def patient_storage_key(patient_id: str, patient_name: str | None, subpath: str) -> str:
+    """Build a tidy, per-patient Storage key:
+
+        patients/<id>__<name-slug>/<subpath>
+
+    so every artefact for a patient (agent report, MO report, images, labs,
+    recordings) lives under one folder named with the id + patient name.
+    """
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", (patient_name or "").strip()).strip("-").lower()[:40] or "patient"
+    return f"patients/{patient_id}__{slug}/{subpath.lstrip('/')}"
+
+
+def copy_url_into(src_url: str, dst_key: str) -> str | None:
+    """Copy an already-uploaded blob (identified by its URL) to dst_key.
+
+    Used to gather intake images/labs into the patient folder. Returns the new
+    URL, or None on any failure (logged, never raised)."""
+    if not src_url:
+        return None
+    try:
+        bucket = get_bucket()
+        marker = f"/{bucket.name}/"
+        if marker not in src_url:
+            return None
+        src_path = urllib.parse.unquote(src_url.split(marker, 1)[1].split("?", 1)[0])
+        new_blob = bucket.copy_blob(bucket.blob(src_path), bucket, dst_key)
+        try:
+            new_blob.make_public()
+            return new_blob.public_url
+        except Exception:
+            return new_blob.generate_signed_url(
+                version="v4", expiration=datetime.timedelta(days=_SIGNED_URL_DAYS), method="GET",
+            )
+    except Exception as e:  # pragma: no cover
+        log.info("copy_url_into failed (-> %s): %s", dst_key, e)
+        return None
 
 
 def upload_public(content: bytes, key: str, content_type: str) -> str:

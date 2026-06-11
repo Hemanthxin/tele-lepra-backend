@@ -1,11 +1,12 @@
 import logging
+import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from google.cloud.firestore import Query
 
 from ..core.config import settings
-from ..core.firebase import get_db
+from ..core.firebase import copy_url_into, get_db, patient_storage_key, upload_public
 from ..core.security import (
     ROLE_ADMIN,
     ROLE_AGENT,
@@ -25,7 +26,7 @@ from ..models.schemas import (
 from ..services import whatsapp
 from ..services.ids import generate_code
 from ..services.rule_engine import inferred_conditions, triage
-from .reports import build_and_upload_decision_pdf
+from .reports import build_and_upload_decision_pdf, build_and_upload_intake_pdf
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +137,100 @@ def submit_screening(case_id: str, body: Screening):
     }
     snap.reference.set(update, merge=True)
 
+    # Gather artefacts into the patient's Storage folder (best-effort — never
+    # blocks the screening if Storage is unavailable). Produces the agent report
+    # PDF and copies the intake images / lab reports into the folder.
+    case_data = snap.to_dict() or {}
+    patient_id = case_data.get("patient_id")
+    if patient_id:
+        try:
+            pat = db.collection("patients").document(patient_id).get()
+            pname = (pat.to_dict() or {}).get("name") if pat.exists else None
+            full_case = {**case_data, **update, "id": case_id, "patient_id": patient_id}
+
+            info = build_and_upload_intake_pdf(full_case)
+            if info:
+                snap.reference.set({"agent_report_url": info[0]}, merge=True)
+
+            imgs = [
+                copy_url_into(u, patient_storage_key(patient_id, pname, f"images/image-{i + 1}.jpg")) or u
+                for i, u in enumerate(screening_doc.get("image_urls") or [])
+            ]
+            labs = [
+                copy_url_into(u, patient_storage_key(patient_id, pname, f"labs/lab-{i + 1}.jpg")) or u
+                for i, u in enumerate(screening_doc.get("lab_urls") or [])
+            ]
+            if imgs or labs:
+                snap.reference.set(
+                    {"patient_folder_images": imgs, "patient_folder_labs": labs}, merge=True,
+                )
+        except Exception as e:  # pragma: no cover
+            log.warning("Patient-folder artefact gathering failed for %s: %s", case_id, e)
+
     return result.model_dump()
+
+
+def _patient_name_for(db, patient_id: str | None) -> str | None:
+    if not patient_id:
+        return None
+    doc = db.collection("patients").document(patient_id).get()
+    return (doc.to_dict() or {}).get("name") if doc.exists else None
+
+
+@router.post(
+    "/{case_id}/documents",
+    dependencies=[Depends(require_roles(ROLE_MO, ROLE_ADMIN))],
+)
+async def upload_post_consult_document(case_id: str, file: UploadFile = File(...)):
+    """MO uploads a post-consultation document (PDF/image) into the patient folder."""
+    db = get_db()
+    snap = _get_case_or_404(db, case_id)
+    case_data = snap.to_dict() or {}
+    patient_id = case_data.get("patient_id")
+    pname = _patient_name_for(db, patient_id)
+
+    raw_name = file.filename or "document.pdf"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip("-") or "document.pdf"
+    ts = _now().strftime("%Y%m%d-%H%M%S")
+    key = patient_storage_key(patient_id or case_id, pname, f"consultation/{ts}-{safe}")
+    content = await file.read()
+    url = upload_public(content, key, file.content_type or "application/octet-stream")
+
+    doc = {"name": raw_name, "url": url, "uploaded_at": _now()}
+    existing = case_data.get("post_consult_docs") or []
+    snap.reference.set(
+        {"post_consult_docs": existing + [doc], "updated_at": _now()}, merge=True,
+    )
+    return doc
+
+
+@router.post(
+    "/{case_id}/recording",
+    dependencies=[Depends(require_roles(ROLE_MO, ROLE_ADMIN))],
+)
+async def upload_consultation_recording(case_id: str, file: UploadFile = File(...)):
+    """Store a tele-consultation screen recording in the patient folder."""
+    db = get_db()
+    snap = _get_case_or_404(db, case_id)
+    case_data = snap.to_dict() or {}
+    patient_id = case_data.get("patient_id")
+    pname = _patient_name_for(db, patient_id)
+
+    ext = (file.filename or "recording.webm").rsplit(".", 1)[-1].lower()
+    if ext not in ("webm", "mp4", "ogg"):
+        ext = "webm"
+    ts = _now().strftime("%Y%m%d-%H%M%S")
+    fname = f"consultation-{ts}.{ext}"
+    key = patient_storage_key(patient_id or case_id, pname, f"recordings/{fname}")
+    content = await file.read()
+    url = upload_public(content, key, file.content_type or "video/webm")
+
+    rec = {"filename": fname, "url": url, "uploaded_at": _now()}
+    existing = case_data.get("recordings") or []
+    snap.reference.set(
+        {"recordings": existing + [rec], "updated_at": _now()}, merge=True,
+    )
+    return rec
 
 
 @router.get(
