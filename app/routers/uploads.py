@@ -6,7 +6,6 @@ from ..core.firebase import upload_public
 from ..core.security import (
     ROLE_ADMIN,
     ROLE_AGENT,
-    ROLE_PATIENT,
     CurrentUser,
     get_current_user,
     require_roles,
@@ -17,7 +16,7 @@ router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 @router.post(
     "/image",
-    dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_ADMIN, ROLE_PATIENT))],
+    dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_ADMIN))],
 )
 async def upload_image(
     file: UploadFile = File(...),

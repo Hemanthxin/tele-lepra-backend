@@ -25,7 +25,6 @@ from ..core.security import (
     ROLE_ADMIN,
     ROLE_AGENT,
     ROLE_MO,
-    ROLE_PATIENT,
     CurrentUser,
     get_current_user,
 )
@@ -63,10 +62,6 @@ def _load_case_or_403(case_id: str, user: CurrentUser) -> dict:
         pass
     elif user.role == ROLE_AGENT:
         if case.get("created_by") != user.uid:
-            raise HTTPException(403, "Forbidden")
-    elif user.role == ROLE_PATIENT:
-        pat_doc = db.collection("patients").document(case["patient_id"]).get()
-        if not pat_doc.exists or pat_doc.to_dict().get("patient_uid") != user.uid:
             raise HTTPException(403, "Forbidden")
     else:
         raise HTTPException(403, "Forbidden")

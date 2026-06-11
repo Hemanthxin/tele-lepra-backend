@@ -8,12 +8,11 @@ from ..core.security import (
     ROLE_ADMIN,
     ROLE_AGENT,
     ROLE_MO,
-    ROLE_PATIENT,
     CurrentUser,
     get_current_user,
     require_roles,
 )
-from ..models.schemas import Patient, PatientCreate, SelfEnrollment
+from ..models.schemas import Patient, PatientCreate
 from ..services.ids import generate_code
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -112,73 +111,4 @@ def get_patient(
     if not doc.exists:
         raise HTTPException(404, "Patient not found")
     data = doc.to_dict()
-    # Patients can only fetch themselves
-    if user.role == "patient" and data.get("patient_uid") != user.uid:
-        raise HTTPException(403, "Forbidden")
     return data
-
-
-@router.get("/me")
-def get_my_patient_record(user: CurrentUser = Depends(get_current_user)):
-    """Return the patient record linked to the current user, or 404."""
-    db = get_db()
-    snaps = list(
-        db.collection("patients")
-        .where("patient_uid", "==", user.uid)
-        .limit(1)
-        .stream()
-    )
-    if not snaps:
-        raise HTTPException(404, "No patient record for this user")
-    return snaps[0].to_dict()
-
-
-@router.post(
-    "/self-enroll",
-    dependencies=[Depends(require_roles(ROLE_PATIENT))],
-)
-def self_enroll(
-    body: SelfEnrollment, user: CurrentUser = Depends(get_current_user)
-):
-    if not body.consent_given:
-        raise HTTPException(400, "Consent is required to enrol.")
-    db = get_db()
-    existing = list(
-        db.collection("patients")
-        .where("patient_uid", "==", user.uid)
-        .limit(1)
-        .stream()
-    )
-    if existing:
-        raise HTTPException(409, "Patient record already exists for this user.")
-    ref = db.collection("patients").document(generate_code(db, "patients"))
-    payload = body.model_dump()
-    payload.update(
-        {
-            "id": ref.id,
-            "created_at": datetime.now(timezone.utc),
-            "created_by": user.uid,
-            "patient_uid": user.uid,
-        }
-    )
-    ref.set(payload)
-    return payload
-
-
-@router.post("/link-self")
-def link_patient_to_auth_user(
-    phone: str, user: CurrentUser = Depends(get_current_user)
-):
-    """
-    A logged-in patient links their auth uid to an existing record the
-    agent created. Match on phone for the MVP.
-    """
-    db = get_db()
-    snaps = list(
-        db.collection("patients").where("phone", "==", phone).limit(1).stream()
-    )
-    if not snaps:
-        raise HTTPException(404, "No patient record matches that phone")
-    doc = snaps[0]
-    doc.reference.set({"patient_uid": user.uid}, merge=True)
-    return {"ok": True, "patient_id": doc.id}

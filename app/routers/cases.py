@@ -10,7 +10,6 @@ from ..core.security import (
     ROLE_ADMIN,
     ROLE_AGENT,
     ROLE_MO,
-    ROLE_PATIENT,
     CurrentUser,
     get_current_user,
     require_roles,
@@ -263,23 +262,11 @@ def mo_queue(limit: int = 50):
 @router.get("/mine")
 def my_cases(user: CurrentUser = Depends(get_current_user)):
     """
-    Patient: returns own cases.
     Agent: returns cases the agent created.
     MO: returns cases assigned to the MO.
     """
     db = get_db()
-    if user.role == ROLE_PATIENT:
-        pat = list(
-            db.collection("patients")
-            .where("patient_uid", "==", user.uid)
-            .limit(1)
-            .stream()
-        )
-        if not pat:
-            return []
-        pid = pat[0].id
-        docs = db.collection("cases").where("patient_id", "==", pid).stream()
-    elif user.role == ROLE_AGENT:
+    if user.role == ROLE_AGENT:
         docs = db.collection("cases").where("created_by", "==", user.uid).stream()
     elif user.role == ROLE_MO:
         docs = (
@@ -299,9 +286,6 @@ def get_case(case_id: str, user: CurrentUser = Depends(get_current_user)):
     data = snap.to_dict()
     pat_doc = db.collection("patients").document(data["patient_id"]).get()
     pat = pat_doc.to_dict() if pat_doc.exists else {}
-    if user.role == ROLE_PATIENT:
-        if pat.get("patient_uid") != user.uid:
-            raise HTTPException(403, "Forbidden")
     # Flatten patient fields under c.patient_<field> for the MO/agent UI which
     # already renders them inline. Doesn't overwrite same-named keys on the case.
     for key, val in (pat or {}).items():

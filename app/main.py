@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .core.config import settings
-from .routers import admin, appointments, auth, cases, patient_auth, patients, phc_meta, reports, uploads, webhook
+from .routers import admin, appointments, auth, cases, patients, phc_meta, reports, uploads, webhook
 
 app = FastAPI(title="Tele-Leprosy Triage API", version="0.1.0")
 
@@ -20,7 +20,6 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
-app.include_router(patient_auth.router)
 app.include_router(patients.router)
 app.include_router(cases.router)
 app.include_router(appointments.router)

@@ -5,11 +5,13 @@ from firebase_admin import auth as fb_auth
 
 from .firebase import init_firebase
 
+# Legacy role kept only for comparing against any pre-existing records; the
+# patient portal/login has been removed, so it is NOT an assignable role.
 ROLE_PATIENT = "patient"
 ROLE_AGENT = "agent"
 ROLE_MO = "mo"
 ROLE_ADMIN = "admin"
-ALL_ROLES = {ROLE_PATIENT, ROLE_AGENT, ROLE_MO, ROLE_ADMIN}
+ALL_ROLES = {ROLE_AGENT, ROLE_MO, ROLE_ADMIN}
 
 
 class CurrentUser:
