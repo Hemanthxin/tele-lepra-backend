@@ -91,8 +91,8 @@ class PatientCreate(BaseModel):
         v = (v or "").strip()
         if not v:
             raise ValueError("Phone number is required")
-        if not _PHONE_RE.match(v):
-            raise ValueError("Phone number looks invalid")
+        if len(re.sub(r"\D", "", v)) != 10:
+            raise ValueError("Phone must be exactly 10 digits")
         return v
 
     @field_validator("head_of_family_phone", mode="before")
@@ -101,8 +101,8 @@ class PatientCreate(BaseModel):
         if v is None or (isinstance(v, str) and not v.strip()):
             return None
         v = v.strip()
-        if not _PHONE_RE.match(v):
-            raise ValueError("Head-of-family phone looks invalid")
+        if len(re.sub(r"\D", "", v)) != 10:
+            raise ValueError("Head-of-family phone must be exactly 10 digits")
         return v
 
     @field_validator("aadhaar_id", mode="before")
