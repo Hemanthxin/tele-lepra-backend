@@ -571,27 +571,24 @@ def build_intake_pdf(case: dict) -> bytes:
         story.append(_mini_label("Past visits / notes", styles))
         story.append(Paragraph(_escape(notes).replace("\n", "<br/>"), styles["body"]))
 
-    # Screening — auto-detected conditions + symptom answers
+    # Screening — the 11-question leprosy symptom checklist (Yes/No per item).
     screen = case.get("screening") or {}
-    suspected = screen.get("suspected_diseases") or []
+    symptoms = screen.get("symptoms") or {}
+    checklist = set(screen.get("symptoms_checklist") or [])
 
-    _sec(story, "Suspected condition(s) — auto-detected", styles)
-    story.append(_pills_row(
-        [_SUSPECT_LABELS.get(d, str(d).replace("_", " ").title()) for d in suspected],
-        styles, "None flagged",
-    ))
+    def _sym_answer(key: str) -> str:
+        if key in symptoms:
+            return _yn(symptoms[key])
+        if key in checklist:
+            return "Yes"
+        return "—"
 
-    # Reported symptoms — show each group that has at least one answered item.
-    _sec(story, "Reported symptoms", styles)
-    for title, items in _SYMPTOM_GROUPS:
-        answered = [(label, key) for (label, key) in items if screen.get(key) not in (None, "")]
-        if not answered:
-            continue
-        story.append(_mini_label(title, styles))
-        story.append(_data_table(
-            [(label, _symptom_value(screen, key)) for (label, key) in answered], styles,
-        ))
-        story.append(Spacer(1, 4))
+    _sec(story, "Symptom screening (11-question checklist)", styles)
+    rows = [
+        (f"{i + 1}. {label}", _sym_answer(key))
+        for i, (key, label) in enumerate(_SYMPTOM_LABELS.items())
+    ]
+    story.append(_data_table(rows, styles))
 
     # Screening event (date + GPS)
     if screen.get("screened_at") or screen.get("geolocation"):
@@ -667,19 +664,6 @@ def build_intake_pdf(case: dict) -> bytes:
                 story.append(Paragraph(f"<b>{_escape(cond)}</b> — {_escape(risk)} risk", styles["body"]))
                 for r in (f.get("reasons") or []):
                     story.append(Paragraph(f"&nbsp;&nbsp;• {_escape(r)}", styles["soft"]))
-
-        # Agent's recorded decision (if made)
-        decision = case.get("agent_decision")
-        if decision:
-            story.append(Spacer(1, 5))
-            label = "Sent to Medical Officer" if decision == "send_mo" else "Closed at community level"
-            story.append(_callout(
-                "Agent decision", label,
-                "warn" if decision == "send_mo" else "good", styles,
-            ))
-            if case.get("agent_decision_note"):
-                story.append(Spacer(1, 3))
-                story.append(Paragraph(_escape(case["agent_decision_note"]), styles["soft"]))
 
         if triage.get("suggested_action"):
             story.append(Spacer(1, 5))

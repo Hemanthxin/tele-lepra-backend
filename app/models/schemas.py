@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -303,6 +303,11 @@ class Screening(BaseModel):
     family_history_leprosy: Optional[bool] = None
     duration_months: int = 0
 
+    # Canonical 11-symptom leprosy checklist (LEPROSY_SYMPTOM_KEYS). The agent
+    # answers Yes/No for each; `symptoms_checklist` is the list of "yes" keys.
+    symptoms: Dict[str, bool] = {}
+    symptoms_checklist: List[str] = []
+
     # Inferred by the engine (echoed back on the stored case); never an input.
     suspected_diseases: List[SuspectDisease] = []
 
@@ -494,15 +499,6 @@ class Appointment(AppointmentCreate):
     zoom_meeting_id: Optional[str] = None
     zoom_join_url: Optional[str] = None
     created_at: datetime
-
-
-# ---------- Agent triage decision (advisory close vs send-to-MO) ----------
-class AgentDecision(BaseModel):
-    action: str  # "send_mo" | "close"
-    # When closing, the agent records which condition (if any) was treated /
-    # ruled out at community level, plus an optional note.
-    chosen_condition: Optional[SuspectDisease] = None
-    note: Optional[str] = None
 
 
 # ---------- MO actions ----------

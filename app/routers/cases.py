@@ -15,14 +15,12 @@ from ..core.security import (
     require_roles,
 )
 from ..models.schemas import (
-    AgentDecision,
     CaseCreate,
     CaseStatus,
     HistoryEntry,
     MOClinicalAssessment,
     MODecision,
     Screening,
-    SUSPECT_DISEASE_LABELS,
 )
 from ..services import whatsapp
 from ..services.ids import generate_code
@@ -114,26 +112,17 @@ def add_history(case_id: str, body: HistoryEntry):
     dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_ADMIN))],
 )
 def submit_screening(case_id: str, body: Screening):
-    """Store the multi-disease screening and compute an advisory triage result.
+    """Store the symptom screening and route the case to the Medical Officer.
 
-    Side-effects (recall scheduling, patient WhatsApp) are NOT fired here — they
-    happen when the agent confirms the decision via /agent-decision. The one
-    automatic path is high leprosy probability (triage.allow_close == False),
-    where the case goes straight to the MO queue.
+    The agent only collects data — there is no agent-side decision. The triage
+    result is stored purely as a leprosy risk summary for the MO's reference.
     """
     db = get_db()
     snap = _get_case_or_404(db, case_id)
     result = triage(body)
 
-    # Forced MO (high leprosy) -> awaiting_mo. Otherwise park in `triaged` and
-    # wait for the agent's Send-to-MO / Close decision.
-    new_status = (
-        CaseStatus.awaiting_mo.value
-        if not result.allow_close
-        else CaseStatus.triaged.value
-    )
-
-    # The engine infers the candidate conditions — the agent does not pick them.
+    # The agent only collects data — every screened case goes to the Medical
+    # Officer queue. The triage result is stored purely as a risk summary.
     suspected = inferred_conditions(result)
     screening_doc = body.model_dump()
     screening_doc["suspected_diseases"] = suspected
@@ -142,102 +131,12 @@ def submit_screening(case_id: str, body: Screening):
         "suspected_diseases": suspected,
         "triage": result.model_dump(),
         "triage_outcome": result.outcome.value,
-        "allow_close": result.allow_close,
-        "status": new_status,
+        "status": CaseStatus.awaiting_mo.value,
         "updated_at": _now(),
     }
-    # Keep the case's headline condition aligned with the leading suspicion.
-    if result.suspected_condition and result.suspected_condition != "none":
-        update["condition"] = result.suspected_condition
     snap.reference.set(update, merge=True)
 
     return result.model_dump()
-
-
-@router.post(
-    "/{case_id}/agent-decision",
-    dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_ADMIN))],
-)
-def agent_decision(case_id: str, body: AgentDecision):
-    """Agent's advisory decision after triage: send to MO or close at community.
-
-    Closing is rejected if triage marked the case as forced-MO (allow_close
-    False) — that case must go to the Medical Officer.
-    """
-    db = get_db()
-    snap = _get_case_or_404(db, case_id)
-    case_data = snap.to_dict() or {}
-
-    if body.action == "send_mo":
-        snap.reference.set(
-            {"status": CaseStatus.awaiting_mo.value, "agent_decision": "send_mo",
-             "agent_decision_note": body.note, "updated_at": _now()},
-            merge=True,
-        )
-        return {"ok": True, "status": CaseStatus.awaiting_mo.value}
-
-    if body.action != "close":
-        raise HTTPException(400, "action must be 'send_mo' or 'close'")
-
-    if case_data.get("allow_close") is False:
-        raise HTTPException(
-            409, "This case has a high leprosy probability and must be sent to the Medical Officer."
-        )
-
-    # Close at community level. A non-leprosy chosen condition => alt-dx close;
-    # otherwise a plain rule-out close.
-    chosen = body.chosen_condition.value if body.chosen_condition else None
-    is_alt_dx = bool(chosen and chosen != "leprosy")
-    new_status = (
-        CaseStatus.closed_alt_dx.value if is_alt_dx else CaseStatus.closed_rule_out.value
-    )
-    snap.reference.set(
-        {
-            "status": new_status,
-            "agent_decision": "close",
-            "agent_decision_note": body.note,
-            "closed_condition": chosen,
-            "closed_at": _now(),
-            "updated_at": _now(),
-        },
-        merge=True,
-    )
-
-    # Schedule a recall and notify the patient.
-    patient_id = case_data.get("patient_id")
-    if patient_id:
-        db.collection("recalls").add(
-            {
-                "case_id": case_id,
-                "patient_id": patient_id,
-                "due_at": _now().replace(microsecond=0),
-                "status": "pending",
-                "weeks_offset": 2 if is_alt_dx else 4,
-            }
-        )
-        phone, name = _patient_phone_name(db, patient_id)
-        if is_alt_dx:
-            cond_label = SUSPECT_DISEASE_LABELS.get(chosen, (chosen or "").replace("_", " ").title())
-            outcome_label = f"Reviewed — {cond_label} suspected, treated at community level"
-            next_step = body.note or "Please follow the advice given. Recall in 2 weeks."
-        else:
-            outcome_label = "No urgent signs detected"
-            next_step = body.note or "Follow-up review in 4-6 weeks. Stay safe."
-        wa_result = _wa_send(phone, settings.wa_tpl_ruleout, [name, outcome_label, next_step])
-        db.collection("notifications").add(
-            {
-                "case_id": case_id,
-                "patient_id": patient_id,
-                "patient_phone": phone,
-                "kind": "agent_close",
-                "payload": {"outcome": outcome_label, "next_step": next_step, "condition": chosen},
-                "whatsapp_result": wa_result,
-                "created_at": _now(),
-                "sent": bool(wa_result.get("messages")),
-            }
-        )
-
-    return {"ok": True, "status": new_status}
 
 
 @router.get(
