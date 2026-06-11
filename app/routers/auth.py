@@ -21,6 +21,7 @@ class RoleAssignment(BaseModel):
 class SelfRegister(BaseModel):
     name: str
     role: str = "agent"  # only agent / mo self-register is allowed
+    phone: str | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -71,15 +72,15 @@ def bootstrap_profile(
         raise HTTPException(400, f"Self-signup role must be one of {SELF_SIGNUP_ROLES}")
     role = body.role
     db = get_db()
-    db.collection("users").document(user.uid).set(
-        {
-            "uid": user.uid,
-            "email": user.email,
-            "name": body.name,
-            "role": role,
-        },
-        merge=True,
-    )
+    profile = {
+        "uid": user.uid,
+        "email": user.email,
+        "name": body.name,
+        "role": role,
+    }
+    if body.phone and body.phone.strip():
+        profile["phone"] = body.phone.strip()
+    db.collection("users").document(user.uid).set(profile, merge=True)
     get_auth().set_custom_user_claims(user.uid, {"role": role})
     return {"ok": True, "role": role}
 

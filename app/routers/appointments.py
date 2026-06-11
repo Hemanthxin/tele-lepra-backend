@@ -26,6 +26,15 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def _user_phone_name(db, uid):
+    """Look up a staff user's phone + name from their profile."""
+    if not uid:
+        return None, None
+    doc = db.collection("users").document(uid).get()
+    d = doc.to_dict() if doc.exists else {}
+    return d.get("phone"), d.get("name")
+
+
 @router.post(
     "",
     dependencies=[Depends(require_roles(ROLE_AGENT, ROLE_MO, ROLE_ADMIN))],
@@ -91,39 +100,50 @@ def schedule_appointment(
         else str(body.scheduled_at)
     )
 
-    # Send WhatsApp template with the join link. The patient taps the link
-    # and joins the tele-consult; WhatsApp itself does not host video — the
-    # video runs in the existing Zoom flow.
-    wa_result = {"skipped": True, "reason": "no_phone"}
-    if pat_phone:
+    # The tele-consult invite goes to all three parties: patient, the agent who
+    # raised the case, and the assigned MO. Each taps the join link to join.
+    agent_phone, agent_name = _user_phone_name(db, case.get("created_by"))
+    mo_phone, mo_name = _user_phone_name(db, body.mo_uid)
+    recipients = [
+        ("patient", pat_phone, pat_name),
+        ("agent", agent_phone, agent_name or "Agent"),
+        ("mo", mo_phone, mo_name or "Doctor"),
+    ]
+
+    results = {}
+    for kind, phone, name in recipients:
+        if not phone:
+            results[kind] = {"skipped": True, "reason": "no_phone"}
+            continue
         try:
-            wa_result = whatsapp.send_template(
-                pat_phone,
+            r = whatsapp.send_template(
+                phone,
                 settings.wa_tpl_appointment,
-                [pat_name, scheduled_str, meeting["join_url"]],
+                [name, scheduled_str, meeting["join_url"]],
                 language=settings.wa_lang,
             )
         except whatsapp.WhatsAppError as e:
-            log.warning("WA dispatch failed for appt %s: %s", ref.id, e)
-            wa_result = {"error": str(e)}
-
-    db.collection("notifications").add(
-        {
-            "case_id": body.case_id,
-            "patient_id": case["patient_id"],
-            "patient_phone": pat_phone,
-            "kind": "appointment_scheduled",
-            "payload": {
-                "scheduled_at": scheduled_str,
-                "zoom_join_url": meeting["join_url"],
-                "zoom_meeting_id": meeting["meeting_number"],
-                "duration_minutes": body.duration_minutes,
-            },
-            "whatsapp_result": wa_result,
-            "created_at": _now(),
-            "sent": bool(wa_result.get("messages")),
-        }
-    )
+            log.warning("WA appt dispatch failed for %s (%s): %s", ref.id, kind, e)
+            r = {"error": str(e)}
+        results[kind] = r
+        db.collection("notifications").add(
+            {
+                "case_id": body.case_id,
+                "patient_id": case["patient_id"],
+                "recipient_role": kind,
+                "patient_phone": phone,
+                "kind": "appointment_scheduled",
+                "payload": {
+                    "scheduled_at": scheduled_str,
+                    "zoom_join_url": meeting["join_url"],
+                    "zoom_meeting_id": meeting["meeting_number"],
+                    "duration_minutes": body.duration_minutes,
+                },
+                "whatsapp_result": r,
+                "created_at": _now(),
+                "sent": bool(r.get("messages")),
+            }
+        )
     return appt
 
 

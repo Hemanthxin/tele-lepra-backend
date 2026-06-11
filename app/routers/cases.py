@@ -43,6 +43,20 @@ def _patient_phone_name(db, patient_id: str):
     return None, "Patient"
 
 
+def _user_phone_name(db, uid: str | None):
+    """Look up a staff user's profile and return (phone, name)."""
+    if not uid:
+        return None, None
+    try:
+        snap = db.collection("users").document(uid).get()
+        if snap.exists:
+            d = snap.to_dict()
+            return d.get("phone"), d.get("name")
+    except Exception as e:  # pragma: no cover
+        log.warning("user lookup failed for %s: %s", uid, e)
+    return None, None
+
+
 def _wa_send(phone: str | None, template: str, params: list[str]) -> dict:
     """Best-effort WhatsApp dispatch — never raises."""
     if not phone:
@@ -354,9 +368,11 @@ def mo_decision(
     }
     snap.reference.set(update, merge=True)
 
-    # WhatsApp the decision to the patient.
+    # The decision message goes to the patient AND the agent who raised the
+    # case — NOT the MO (who made the decision).
     patient_id = case_data.get("patient_id")
-    phone, name = _patient_phone_name(db, patient_id) if patient_id else (None, "Patient")
+    pat_phone, pat_name = _patient_phone_name(db, patient_id) if patient_id else (None, "Patient")
+    agent_phone, agent_name = _user_phone_name(db, case_data.get("created_by"))
 
     if body.decision == "refer":
         outcome_label = "Referred for further care"
@@ -369,46 +385,52 @@ def mo_decision(
         next_step = body.prescription or "Follow the prescription provided. Reach out if symptoms worsen."
 
     # Build + upload the decision PDF from the UPDATED case (merge the decision
-    # fields onto the pre-update snapshot) so the patient's copy reflects it.
-    # This is done independently of WhatsApp: the decision and its PDF are
-    # persisted on save, whether or not the message is ever sent.
+    # fields onto the pre-update snapshot). Done independently of WhatsApp: the
+    # decision and its PDF are persisted on save, whether or not it is sent.
     pdf_info = build_and_upload_decision_pdf({**case_data, **update, "id": case_id})
     if pdf_info:
         snap.reference.set(
             {"report_url": pdf_info[0], "report_filename": pdf_info[1], "report_generated_at": now},
             merge=True,
         )
-    wa_result: dict = {}
-    if phone and pdf_info:
-        pdf_url, pdf_filename = pdf_info
-        try:
-            wa_result = whatsapp.send_template(
-                phone,
-                settings.wa_tpl_decision_with_report,
-                [name, outcome_label, next_step],
-                language=settings.wa_lang,
-                document_url=pdf_url,
-                document_filename=pdf_filename,
-            )
-        except whatsapp.WhatsAppError as e:
-            log.warning("WA with-report dispatch failed (%s): %s — falling back to text template",
-                        settings.wa_tpl_decision_with_report, e)
-            wa_result = {}  # trigger fallback
-    if not wa_result.get("messages"):
-        # Plain-text fallback (or no PDF available).
-        wa_result = _wa_send(phone, settings.wa_tpl_decision, [name, outcome_label, next_step])
 
-    db.collection("notifications").add(
-        {
-            "case_id": case_id,
-            "patient_id": patient_id,
-            "patient_phone": phone,
-            "kind": body.decision,
-            "payload": body.model_dump(),
-            "whatsapp_result": wa_result,
-            "report_url": pdf_info[0] if pdf_info else None,
-            "created_at": _now(),
-            "sent": bool(wa_result.get("messages")),
-        }
-    )
+    def _send_decision(phone: str | None, name: str | None) -> dict:
+        if not phone:
+            return {"skipped": True, "reason": "no_phone"}
+        res: dict = {}
+        if pdf_info:
+            try:
+                res = whatsapp.send_template(
+                    phone, settings.wa_tpl_decision_with_report,
+                    [name or "there", outcome_label, next_step],
+                    language=settings.wa_lang,
+                    document_url=pdf_info[0], document_filename=pdf_info[1],
+                )
+            except whatsapp.WhatsAppError as e:
+                log.warning("WA with-report dispatch failed (%s): %s — falling back",
+                            settings.wa_tpl_decision_with_report, e)
+                res = {}
+        if not res.get("messages"):
+            res = _wa_send(phone, settings.wa_tpl_decision, [name or "there", outcome_label, next_step])
+        return res
+
+    for kind, phone, name in (
+        ("patient", pat_phone, pat_name),
+        ("agent", agent_phone, agent_name or "Agent"),
+    ):
+        res = _send_decision(phone, name)
+        db.collection("notifications").add(
+            {
+                "case_id": case_id,
+                "patient_id": patient_id,
+                "recipient_role": kind,
+                "patient_phone": phone,
+                "kind": body.decision,
+                "payload": body.model_dump(),
+                "whatsapp_result": res,
+                "report_url": pdf_info[0] if pdf_info else None,
+                "created_at": _now(),
+                "sent": bool(res.get("messages")),
+            }
+        )
     return {"ok": True, "status": new_status, "report_url": pdf_info[0] if pdf_info else None}
