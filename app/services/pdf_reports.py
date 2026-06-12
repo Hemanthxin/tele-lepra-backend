@@ -541,6 +541,7 @@ def build_intake_pdf(case: dict) -> bytes:
     story.append(_data_table([
         ("House no", case.get("patient_house_no")),
         ("Village", case.get("patient_village")),
+        ("Taluk", case.get("patient_taluk")),
         ("Gram Panchayat", case.get("patient_gram_panchayat")),
         ("District", case.get("patient_district")),
         ("State", case.get("patient_state")),

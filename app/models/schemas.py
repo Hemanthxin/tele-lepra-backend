@@ -64,6 +64,7 @@ class PatientCreate(BaseModel):
     location: str
     state: Optional[str] = None
     district: Optional[str] = None
+    taluk: Optional[str] = None
     village: Optional[str] = None
     aadhaar_id: Optional[str] = Field(default=None, description="12-digit Aadhaar number")
     abha_id: Optional[str] = Field(default=None, description="14-digit ABHA health ID")
