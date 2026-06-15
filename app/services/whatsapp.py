@@ -139,20 +139,35 @@ def send_template(
             return r.json()
         except httpx.HTTPStatusError as e:
             last_err = e
-            # 132001 = template not found in this locale — try next candidate.
             body = e.response.text or ""
+            # 132001 = template not found in this locale — try next candidate.
             if "132001" in body or e.response.status_code == 404:
                 continue
-            # Different error — fail fast, don't keep trying.
+            # 132012 = parameter format mismatch — retrying other locales won't help.
+            if "132012" in body:
+                log.warning(
+                    "WhatsApp template %s: parameter format mismatch (132012). "
+                    "The header/body definition in Meta Business Manager does not match "
+                    "what the code sent (check header type and parameter count). Body: %s",
+                    template_name, body[:400],
+                )
+                break
+            # Any other error — fail fast.
             break
         except httpx.HTTPError as e:
             log.error("WhatsApp transport error: %s", e)
             raise WhatsAppError(str(e)) from e
 
     if last_err is not None:
+        body = last_err.response.text or ""
+        if "132012" in body:
+            raise WhatsAppError(
+                f"Template {template_name!r} parameter format mismatch (132012) — "
+                "check the template's header type and parameter count in Meta Business Manager."
+            ) from last_err
         log.warning(
             "WhatsApp template %s not configured in any of %s — skipping. Body: %s",
-            template_name, candidates, (last_err.response.text or "")[:200],
+            template_name, candidates, body[:200],
         )
         raise WhatsAppError(
             f"Template {template_name!r} not configured in WhatsApp Business (tried {candidates})."
