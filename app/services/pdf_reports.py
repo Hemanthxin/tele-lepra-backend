@@ -323,9 +323,9 @@ def _triage_kind(outcome: str) -> str:
 
 def _decision_kind(status: str) -> str:
     s = (status or "").lower()
-    if s == "referred":
+    if s in ("referred", "refer", "escalate"):
         return "warn"
-    if "closed" in s:
+    if "closed" in s or s in ("rule_out", "ruled_out", "close_remote"):
         return "good"
     return "info"
 
@@ -657,44 +657,6 @@ def build_intake_pdf(case: dict) -> bytes:
             for u in rx_urls[:20]:
                 story.append(Paragraph(f"<link href='{_escape(u)}'>{_escape(u)}</link>", styles["soft"]))
 
-    # Triage result (if screening submitted)
-    triage = case.get("triage") or {}
-    if triage:
-        _sec(story, "Automated triage result", styles)
-        outcome = str(triage.get("outcome") or "").replace("_", " ").title() or "—"
-        story.append(_callout("Triage outcome", outcome, _triage_kind(triage.get("outcome")), styles))
-        story.append(Spacer(1, 5))
-        conf = triage.get("confidence")
-        allow_close = triage.get("allow_close")
-        disposition = (
-            "Forced — Send to Medical Officer" if allow_close is False
-            else "Agent's choice: Send to MO or Close" if allow_close is True
-            else None
-        )
-        story.append(_data_table([
-            ("Confidence", f"{int((conf or 0) * 100)}%" if conf is not None else None),
-            ("Suspected condition", triage.get("suspected_condition")),
-            ("Recommendation", triage.get("recommendation")),
-            ("Disposition", disposition),
-        ], styles))
-
-        # Per-condition findings
-        findings = triage.get("condition_findings") or []
-        if findings:
-            story.append(Spacer(1, 5))
-            story.append(_mini_label("Conditions assessed", styles))
-            for f in findings:
-                cond = _SUSPECT_LABELS.get(f.get("condition"), str(f.get("condition")))
-                risk = str(f.get("risk") or "").title()
-                story.append(Paragraph(f"<b>{_escape(cond)}</b> — {_escape(risk)} risk", styles["body"]))
-                for r in (f.get("reasons") or []):
-                    story.append(Paragraph(f"&nbsp;&nbsp;• {_escape(r)}", styles["soft"]))
-
-        if triage.get("suggested_action"):
-            story.append(Spacer(1, 5))
-            story.append(_mini_label("Suggested action", styles))
-            story.append(Paragraph(_escape(triage["suggested_action"]), styles["body"]))
-
     doc.build(story, canvasmaker=_make_canvas(meta))
     return buf.getvalue()
 
@@ -802,17 +764,22 @@ def build_decision_pdf(case: dict) -> bytes:
             story.append(Paragraph(_escape(ca["treatment_plan"]).replace("\n", "<br/>"), styles["body"]))
 
     # Decision
-    decision = case.get("status") or ""
-    if decision == "referred":
+    decision = case.get("status") or case.get("triage_outcome") or case.get("decision") or ""
+    decision_str = str(decision).lower()
+
+    if decision_str in ("referred", "refer"):
         decision_label = "Referred for further care"
-    elif decision == "closed_alt_dx":
+    elif decision_str in ("closed_alt_dx", "alternative_dx", "alt_dx"):
         decision_label = "Closed — alternative diagnosis, treated at community level"
-    elif "closed" in decision:
+    elif "closed" in decision_str or decision_str in ("close_remote", "rule_out", "ruled_out"):
         decision_label = "Closed remotely (rule-out / treated at community)"
+    elif decision_str == "escalate":
+        decision_label = "Escalated to Medical Officer"
     else:
-        decision_label = decision.replace("_", " ").title() if decision else "—"
+        decision_label = str(decision).replace("_", " ").title() if decision else "—"
+
     _sec(story, "Final decision", styles)
-    story.append(_callout("Outcome", decision_label, _decision_kind(decision), styles))
+    story.append(_callout("Outcome", decision_label, _decision_kind(decision_str), styles))
     extra: list[tuple[str, Any]] = []
     if case.get("prescription"):
         extra.append(("Prescription / care plan", case["prescription"]))
