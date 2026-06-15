@@ -205,13 +205,13 @@ def get_patient(
         raise HTTPException(404, "Patient not found")
     data = doc.to_dict()
 
-    # Get history
+    # Get history — sort in Python to avoid requiring a composite Firestore index.
     cases = [
         c.to_dict()
         for c in db.collection("cases")
         .where("patient_id", "==", patient_id)
-        .order_by("created_at", direction=Query.DESCENDING)
         .stream()
     ]
+    cases.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     data["cases"] = cases
     return data
