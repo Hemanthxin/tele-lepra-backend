@@ -763,23 +763,32 @@ def build_decision_pdf(case: dict) -> bytes:
             story.append(_mini_label("Treatment plan", styles))
             story.append(Paragraph(_escape(ca["treatment_plan"]).replace("\n", "<br/>"), styles["body"]))
 
-    # Decision
-    decision = case.get("status") or case.get("triage_outcome") or case.get("decision") or ""
-    decision_str = str(decision).lower()
-
-    if decision_str in ("referred", "refer"):
-        decision_label = "Referred for further care"
-    elif decision_str in ("closed_alt_dx", "alternative_dx", "alt_dx"):
-        decision_label = "Closed — alternative diagnosis, treated at community level"
-    elif "closed" in decision_str or decision_str in ("close_remote", "rule_out", "ruled_out"):
-        decision_label = "Closed remotely (rule-out / treated at community)"
-    elif decision_str == "escalate":
-        decision_label = "Escalated to Medical Officer"
+    # Decision — use the MO's explicit choice (mo_decision) as primary source so
+    # the label in the PDF matches exactly what was selected in the decision card.
+    _MO_DECISION_LABELS = {
+        "close_remote": "Rule-out — Home care, recall in 4–6 weeks",
+        "alt_dx": "Alternative Diagnosis — Provide treatment & close",
+        "refer": "Escalate — Refer to PHC / CHC / Hospital",
+    }
+    mo_decision = (case.get("mo_decision") or "").strip()
+    if mo_decision in _MO_DECISION_LABELS:
+        decision_label = _MO_DECISION_LABELS[mo_decision]
+        decision_kind_val = _decision_kind(mo_decision)
     else:
-        decision_label = str(decision).replace("_", " ").title() if decision else "—"
+        # Fallback for legacy cases without mo_decision field.
+        fallback = (case.get("status") or "").lower()
+        if "refer" in fallback:
+            decision_label = "Escalate — Refer to PHC / CHC / Hospital"
+        elif "alt_dx" in fallback or "alternative" in fallback:
+            decision_label = "Alternative Diagnosis — Provide treatment & close"
+        elif "closed" in fallback or "rule_out" in fallback:
+            decision_label = "Rule-out — Home care, recall in 4–6 weeks"
+        else:
+            decision_label = fallback.replace("_", " ").title() if fallback else "—"
+        decision_kind_val = _decision_kind(fallback)
 
     _sec(story, "Final decision", styles)
-    story.append(_callout("Outcome", decision_label, _decision_kind(decision_str), styles))
+    story.append(_callout("Outcome", decision_label, decision_kind_val, styles))
     extra: list[tuple[str, Any]] = []
     if case.get("prescription"):
         extra.append(("Prescription / care plan", case["prescription"]))

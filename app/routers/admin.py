@@ -34,11 +34,20 @@ def metrics():
             referred += 1
         if c.get("status") == "closed_remote":
             closed_remote += 1
+
+    patients = [d.to_dict() for d in db.collection("patients").stream()]
+    by_phc: dict[str, int] = {}
+    for p in patients:
+        phc = (p.get("phc") or "").strip() or "Unknown"
+        by_phc[phc] = by_phc.get(phc, 0) + 1
+
     return {
         "total_cases": len(cases),
         "by_triage_outcome": by_outcome,
         "referral_rate_pct": round(100 * referred / total, 1),
         "remote_closure_rate_pct": round(100 * closed_remote / total, 1),
+        "by_phc": by_phc,
+        "total_patients": len(patients),
     }
 
 
