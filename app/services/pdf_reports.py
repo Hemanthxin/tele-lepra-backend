@@ -498,7 +498,21 @@ def _symptom_value(screen: dict, key: str) -> str:
 
 # ========== INTAKE PDF ==========
 def build_intake_pdf(case: dict) -> bytes:
-    """Patient intake report — everything the agent captured."""
+    """Patient intake report — everything the agent captured.
+    
+    The agent intake now uses a simplified 11-question leprosy symptom checklist:
+    - screening.symptoms: Dict[str, bool] — Yes/No for each of the 11 symptoms
+    - screening.symptoms_checklist: List[str] — Keys of symptoms answered "Yes"
+    - screening.duration_months: int — Symptom duration in months
+    - screening.family_history_leprosy: bool — Household contact with leprosy
+    - screening.screened_at: datetime — When screening was performed
+    - screening.geolocation: GeoPoint — GPS coordinates if captured
+    - screening.image_urls: List[str] — URLs of screening images
+    - screening.lab_urls: List[str] — URLs of prior lab reports
+    - screening.notes: str — Agent notes
+    
+    Plus patient demographics, location, household info, and medical history.
+    """
     styles = _styles()
     buf = BytesIO()
     case_id = case.get("id", "")
@@ -584,6 +598,16 @@ def build_intake_pdf(case: dict) -> bytes:
             return "Yes"
         return "—"
 
+    # Screening context — Duration & household contact
+    _sec(story, "Screening context", styles)
+    duration = screen.get("duration_months")
+    family_history = screen.get("family_history_leprosy")
+    story.append(_data_table([
+        ("Duration of symptoms (months)", _val(duration) if duration or duration == 0 else "—"),
+        ("Household contact with leprosy", _yn(family_history)),
+    ], styles))
+
+    # 11-question leprosy symptom checklist
     _sec(story, "Symptom screening (11-question checklist)", styles)
     rows = [
         (f"{i + 1}. {label}", _sym_answer(key))
