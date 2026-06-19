@@ -58,15 +58,11 @@ def _post_template(
 ):
     components: list[dict] = []
     if document_url:
+        # Template header is TEXT type with {{1}} = the report URL as a plain-text link.
+        # (Meta template was created with a TEXT header, not DOCUMENT.)
         components.append({
             "type": "header",
-            "parameters": [{
-                "type": "document",
-                "document": {
-                    "link": document_url,
-                    **({"filename": document_filename} if document_filename else {}),
-                },
-            }],
+            "parameters": [{"type": "text", "text": document_url}],
         })
     components.append({
         "type": "body",
