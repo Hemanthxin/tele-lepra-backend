@@ -59,10 +59,12 @@ def _post_template(
     components: list[dict] = []
     if document_url:
         # Template header is TEXT type with {{1}} = the report URL as a plain-text link.
-        # (Meta template was created with a TEXT header, not DOCUMENT.)
+        # WhatsApp rejects _ in text parameters (parses as italic formatting — error 132007).
+        # Percent-encode bare underscores; %5F is equivalent and browsers resolve it fine.
+        safe_url = document_url.replace("_", "%5F")
         components.append({
             "type": "header",
-            "parameters": [{"type": "text", "text": document_url}],
+            "parameters": [{"type": "text", "text": safe_url}],
         })
     components.append({
         "type": "body",
