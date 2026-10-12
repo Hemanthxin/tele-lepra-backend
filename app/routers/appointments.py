@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -24,6 +24,19 @@ router = APIRouter(prefix="/appointments", tags=["appointments"])
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+# India Standard Time — patients and staff read appointment times in IST.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _format_ist(value) -> str:
+    """Human-readable IST time for WhatsApp, e.g. '09 Oct 2026, 01:20 PM IST'."""
+    if not isinstance(value, datetime):
+        return str(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(IST).strftime("%d %b %Y, %I:%M %p IST")
 
 
 def _user_phone_name(db, uid):
@@ -94,11 +107,7 @@ def schedule_appointment(
     pat_phone = pat_data.get("phone")
     pat_name = pat_data.get("name") or case.get("patient_name") or "Patient"
 
-    scheduled_str = (
-        body.scheduled_at.isoformat()
-        if hasattr(body.scheduled_at, "isoformat")
-        else str(body.scheduled_at)
-    )
+    scheduled_str = _format_ist(body.scheduled_at)
 
     # The tele-consult invite goes to all three parties: patient, the agent who
     # raised the case, and the assigned MO. Each taps the join link to join.
@@ -134,7 +143,11 @@ def schedule_appointment(
                 "patient_phone": phone,
                 "kind": "appointment_scheduled",
                 "payload": {
-                    "scheduled_at": scheduled_str,
+                    "scheduled_at": (
+                        body.scheduled_at.isoformat()
+                        if hasattr(body.scheduled_at, "isoformat")
+                        else str(body.scheduled_at)
+                    ),
                     "zoom_join_url": meeting["join_url"],
                     "zoom_meeting_id": meeting["meeting_number"],
                     "duration_minutes": body.duration_minutes,
