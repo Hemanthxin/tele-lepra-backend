@@ -482,6 +482,7 @@ _SYMPTOM_GROUPS = [
     ]),
     ("General", [
         ("Family history of leprosy", "family_history_leprosy"),
+        ("History of MDT intake", "mdt_history"),
         ("Duration (months)", "duration_months"),
     ]),
 ]
@@ -505,6 +506,7 @@ def build_intake_pdf(case: dict) -> bytes:
     - screening.symptoms_checklist: List[str] — Keys of symptoms answered "Yes"
     - screening.duration_months: int — Symptom duration in months
     - screening.family_history_leprosy: bool — Household contact with leprosy
+    - screening.mdt_history: bool — History of Multi-Drug Therapy (MDT) intake
     - screening.screened_at: datetime — When screening was performed
     - screening.geolocation: GeoPoint — GPS coordinates if captured
     - screening.image_urls: List[str] — URLs of screening images
@@ -605,6 +607,7 @@ def build_intake_pdf(case: dict) -> bytes:
     story.append(_data_table([
         ("Duration of symptoms (months)", _val(duration) if duration or duration == 0 else "—"),
         ("Household contact with leprosy", _yn(family_history)),
+        ("History of MDT intake", _yn(screen.get("mdt_history"))),
     ], styles))
 
     # 11-question leprosy symptom checklist

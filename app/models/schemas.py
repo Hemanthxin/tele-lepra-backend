@@ -302,6 +302,8 @@ class Screening(BaseModel):
 
     # --- General context ---
     family_history_leprosy: Optional[bool] = None
+    # Has the patient ever taken Multi-Drug Therapy (MDT) for leprosy?
+    mdt_history: Optional[bool] = None
     duration_months: int = 0
 
     # Canonical 11-symptom leprosy checklist (LEPROSY_SYMPTOM_KEYS). The agent
